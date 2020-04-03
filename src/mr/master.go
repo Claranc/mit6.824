@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -19,23 +18,23 @@ const (
 
 type Master struct {
 	// Your definitions here.
-	inputFileList []string
-	mu            sync.Mutex
-	nReduce       int
-	State         int
-	MapTask       map[int]*MapTaskStatus
-	ReduceTask    map[int]*ReduceTaskStatus
+	inputFileList []string //输入文件列表
+	mu            sync.Mutex //互斥锁，操作贡献变量均需要加锁
+	nReduce       int //Reduce数量
+	State         int //当前状态 map reduce success
+	MapTask       map[int]*MapTaskStatus //map 任务状态
+	ReduceTask    map[int]*ReduceTaskStatus //reduce 任务状态
 }
 
 type MapTaskStatus struct {
-	Status    int
-	StartTime time.Time
+	Status    int //当前状态
+	StartTime time.Time // 开始时间
 }
 
 type ReduceTaskStatus struct {
-	Status    int
-	StartTime time.Time
-	fileList  []string
+	Status    int //当前状态
+	StartTime time.Time //开始时间
+	fileList  []string //临时文件列表
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -55,14 +54,19 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (m *Master) GetMapTask(args *GetMapTaskRequest, reply *GetMapTaskResponse) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.State != Map {
+		reply.MapStatus = Finish
+		return nil
+	}
+
 	var fileName string
 	var mapStatus int
 	var mapID int
-	isFinished := true
+	// 轮询map任务列表，找到是否存在可分配的Map任务
 	for k, v := range m.MapTask {
-		fmt.Printf("k %d, v:%+v \n", k, v.Status)
 		if v.Status == UnInit {
-			isFinished = false
+			// 未开始，直接分配
 			fileName = m.inputFileList[k]
 			mapStatus = Normal
 			v.Status= Processing
@@ -71,7 +75,7 @@ func (m *Master) GetMapTask(args *GetMapTaskRequest, reply *GetMapTaskResponse) 
 			break
 		} else if v.Status == Processing {
 			if time.Since(v.StartTime) > 10*time.Second {
-				isFinished = false
+				// 已开始，但是超时，重新分配
 				fileName = m.inputFileList[k]
 				mapStatus = Normal
 				mapID = k
@@ -80,24 +84,21 @@ func (m *Master) GetMapTask(args *GetMapTaskRequest, reply *GetMapTaskResponse) 
 			}
 		}
 	}
-	if isFinished {
-		m.State = Reduce
-		mapStatus = Finish
-	} else if fileName == "" {
+	if fileName == "" {
+		// 当前没有可分配的map任务，但是还有worker在执行map操作，返回继续监听
 		mapStatus = Waiting
 	}
 	reply.FileName = fileName
 	reply.MapID = mapID
 	reply.ReduceSum = m.nReduce
 	reply.MapStatus = mapStatus
-	fmt.Printf("res = %+v\n", reply)
 	return nil
 }
 
 // Shuffle map完成，提交给master
 func (m *Master) Shuffle(args *ShuffleRequest, reply *ShuffleResponse) error {
-	//m.mu.Lock()
-	//defer m.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	// 先查询是否为重复提交
 	mapInfo, ok := m.MapTask[args.MapID]
 	if ok {
@@ -115,6 +116,7 @@ func (m *Master) Shuffle(args *ShuffleRequest, reply *ShuffleResponse) error {
 		reply.Status = false
 		return nil
 	}
+	// 处理map提交
 	mapInfo.Status = Finish
 	for k, v := range args.FileListMap {
 		_, ok := m.ReduceTask[k]
@@ -128,18 +130,38 @@ func (m *Master) Shuffle(args *ShuffleRequest, reply *ShuffleResponse) error {
 		}
 	}
 	reply.Status = true
+	// 该次提交完成后，查询所有map操作是否都结束了
+	isFinished := true
+	for _, v := range m.MapTask {
+		if v.Status != Finish {
+			isFinished= false
+			break
+		}
+	}
+	if isFinished {
+		//所有map均完成提交，更改状态，进入Reduce
+		m.State = Reduce
+	}
 	return nil
 }
 
 
 // GetReduceTask 分配REDUCE任务
 func (m *Master) GetReduceTask(args *GetReduceTaskRequest, reply *GetReduceTaskResponse) error {
-	//m.mu.Lock()
-	//defer m.mu.Unlock()
-	if m.State == Map {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 如果当前不是阶段
+	if m.State != Reduce {
 		// map阶段未完成
+		var respStatus int
+		if m.State == Map {
+			respStatus = UnInit
+		} else {
+			respStatus = Finish
+		}
 		reply = &GetReduceTaskResponse{
-			Status: UnInit,
+			Status: respStatus,
 		}
 		return nil
 	}
@@ -147,10 +169,8 @@ func (m *Master) GetReduceTask(args *GetReduceTaskRequest, reply *GetReduceTaskR
 	var reduceID int
 	var fileList []string
 	var reduceStatus int
-	isFinished := true
 	for k, v := range m.ReduceTask {
 		if v.Status == UnInit {
-			isFinished = false
 			// 返回参数
 			reduceID = k
 			fileList = v.fileList
@@ -160,7 +180,6 @@ func (m *Master) GetReduceTask(args *GetReduceTaskRequest, reply *GetReduceTaskR
 			reduceStatus = Normal
 			break
 		} else if v.Status == Processing {
-			isFinished = false
 			if time.Since(v.StartTime) > 10*time.Second {
 				// 返回参数
 				reduceID = k
@@ -172,10 +191,8 @@ func (m *Master) GetReduceTask(args *GetReduceTaskRequest, reply *GetReduceTaskR
 			}
 		}
 	}
-	if isFinished {
-		reduceStatus = Finish
-		m.State = Success
-	} else if fileList == nil {
+	if fileList == nil {
+		// 未分配Reduce任务，也未完成，继续等待别的worker提交，让它继续监听
 		reduceStatus = Waiting
 	}
 	reply.ReduceID = reduceID
@@ -185,9 +202,21 @@ func (m *Master) GetReduceTask(args *GetReduceTaskRequest, reply *GetReduceTaskR
 }
 
 func (m *Master) SubmitReduce(args *SubmitReduceRequest, reply *SubmitReduceResponse) error {
-	//m.mu.Lock()
-	//defer m.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.ReduceTask[args.ReduceID].Status = Finish
+
+	// 查看Reduce任务是否已全部完成
+	isFinished := true
+	for _, v := range m.ReduceTask {
+		if v.Status != Finish {
+			isFinished = false
+			break
+		}
+	}
+	if isFinished {
+		m.State = Success
+	}
 	reply.Status = true
 	return nil
 }

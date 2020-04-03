@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"code.byted.org/gopkg/logs"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -9,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"time"
+	"math/rand"
 )
 import "log"
 import "net/rpc"
@@ -22,6 +22,7 @@ type KeyValue struct {
 	Value string
 }
 
+//用来排序
 type ByKey []KeyValue
 
 // for sorting by key.
@@ -48,19 +49,25 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the master.
+
 	//step: MAP
 	for {
 		mapTask, ok := CallGetMapTask()
 		if !ok {
-			time.Sleep(2 * time.Second)
-			continue
+			log.Fatalf("rpc failed")
 		}
 		if mapTask.MapStatus == Finish {
+			// map阶段已完成，跳出
 			break
 		} else if mapTask.MapStatus == Waiting {
+			// 等待别的worker完成map,继续监听，防止worker宕机
 			time.Sleep(2 * time.Second)
 			continue
+		} else if mapTask.MapStatus != Normal {
+			// 非正常状态，跳出吧，不太可能有这个返回
+			break
 		}
+		// 处理master返回的Input 文件
 		mapFile, err := os.Open(mapTask.FileName)
 		if err != nil {
 			log.Fatalf("cannot open %v", mapTask.FileName)
@@ -72,12 +79,15 @@ func Worker(mapf func(string, string) []KeyValue,
 		mapFile.Close()
 		kva := mapf(mapTask.FileName, string(content))
 
-		fileListMap := make(map[int][]string)
-		fileNameMap := make(map[string][]KeyValue)
+		fileListMap := make(map[int][]string) //key: reduceID  value：该reduceID的文件列表
+		fileNameMap := make(map[string][]KeyValue) // key: 文件名  value: kv键值对
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		randNo := r.Intn(1000) // 每个worker在生成map阶段临时文件的时候，文件名带有一个随机数，防止不同worker在针对同一map任务进行写冲突
 		for _, kv := range kva {
-			idx := ihash(kv.Key)%mapTask.ReduceSum
-			reduceFilename := buildReduceFilename(mapTask.MapID, idx)
+			idx := ihash(kv.Key)%mapTask.ReduceSum //为该key找到对应的reduceID
+			reduceFilename := buildReduceFilename(randNo, mapTask.MapID, idx) //生成临时文件名
 			if _, ok := fileNameMap[reduceFilename]; !ok {
+				//该文件第一次出现，初始化
 				if _, ok := fileListMap[idx]; !ok {
 					fileListMap[idx] = []string{reduceFilename}
 				} else {
@@ -86,8 +96,10 @@ func Worker(mapf func(string, string) []KeyValue,
 				fileNameMap[reduceFilename] = []KeyValue{kv}
 				continue
 			}
+			//该文件名已生成，进行内容追加
 			fileNameMap[reduceFilename] = append(fileNameMap[reduceFilename], kv)
 		}
+		// 将文件内容统一落盘
 		for filename,kvs := range fileNameMap {
 			file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_APPEND,0644)
 			if err != nil {
@@ -104,10 +116,10 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 
 
-		// shuffle
+		// shuffle  通知master 该map操作已完成以及告知生成的临时文件
 		ok = CallShuffle(mapTask.MapID, fileListMap)
 		if !ok {
-			logs.Fatalf("Shuffle failed")
+			log.Fatalf("Shuffle failed")
 		}
 	}
 
@@ -115,15 +127,18 @@ func Worker(mapf func(string, string) []KeyValue,
 	for {
 		reduceTask, ok := CallGetReduceTask()
 		if !ok {
-			time.Sleep(2 * time.Second)
-			continue
+			// RPC操作失败，默认master崩了，结束
+			break
 		}
 		if reduceTask.Status == Finish {
+			// 该任务Reduce操作已完成，结束
 			break
 		} else if reduceTask.Status == Waiting || reduceTask.Status == UnInit {
+			// 等待别的worker进行Reduce操作进行监听； Reduce操作未开始，继续监听
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		// 读取临时文件，进行Reduce操作
 		res := []KeyValue{}
 		for _, filename := range reduceTask.FileList {
 			file, err := os.Open(filename)
@@ -167,8 +182,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
-func buildReduceFilename(mapID int, reduceID int) string {
-	return "mr_" + strconv.Itoa(mapID) + "_" + strconv.Itoa(reduceID) + ".txt"
+func buildReduceFilename(randNum int, mapID int, reduceID int) string {
+	return "mr_" + strconv.Itoa(randNum) + "_" + strconv.Itoa(mapID) + "_" + strconv.Itoa(reduceID) + ".txt"
 }
 
 //
@@ -198,7 +213,6 @@ func CallGetMapTask() (*GetMapTaskResponse, bool) {
 	args := &GetMapTaskRequest{}
 	reply := &GetMapTaskResponse{}
 	flag := call("Master.GetMapTask", &args, &reply)
-	fmt.Printf("CallGetMapTask reply %+v\n", reply)
 	return reply, flag
 }
 
@@ -206,7 +220,6 @@ func CallGetReduceTask() (*GetReduceTaskResponse, bool) {
 	args := &GetReduceTaskRequest{}
 	reply := &GetReduceTaskResponse{}
 	flag := call("Master.GetReduceTask", &args, &reply)
-	fmt.Printf("CallGetReduceTask reply %+v\n", reply)
 	return reply, flag
 }
 
@@ -217,7 +230,6 @@ func CallShuffle(mapID int, reduceFile map[int][]string) bool {
 	}
 	reply := &ShuffleResponse{}
 	flag := call("Master.Shuffle", &args, &reply)
-	fmt.Printf("CallShuffle reply %+v\n", reply)
 	return flag
 }
 
@@ -225,7 +237,6 @@ func CallSubmitReduce(reduceID int) bool {
 	args := &SubmitReduceRequest{ReduceID: reduceID}
 	reply := &SubmitReduceResponse{}
 	flag := call("Master.SubmitReduce", &args, &reply)
-	fmt.Printf("CallSubmitReduce reply %+v\n", reply)
 	return flag
 }
 

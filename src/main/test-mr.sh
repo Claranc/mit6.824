@@ -32,7 +32,7 @@ failed_any=0
 
 # generate the correct output
 ../mrsequential ../../mrapps/wc.so ../pg*txt || exit 1
-sort mr-out-0 > mr-correct-wc.txt
+sort mr-out-0 >> mr-correct-wc.txt
 rm -f mr-out*
 
 echo '***' Starting wc test.
@@ -56,7 +56,7 @@ wait
 # to exit when a job is completely finished, and not before,
 # that means the job has finished.
 
-sort mr-out* | grep . > mr-wc-all
+sort mr-out* | grep . >> mr-wc-all
 if cmp mr-wc-all mr-correct-wc.txt
 then
   echo '---' wc test: PASS

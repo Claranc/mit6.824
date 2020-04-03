@@ -17,24 +17,23 @@ const (
 )
 
 type Master struct {
-	// Your definitions here.
-	inputFileList []string //输入文件列表
-	mu            sync.Mutex //互斥锁，操作贡献变量均需要加锁
-	nReduce       int //Reduce数量
-	State         int //当前状态 map reduce success
-	MapTask       map[int]*MapTaskStatus //map 任务状态
+	inputFileList []string                  //输入文件列表
+	mu            sync.Mutex                //互斥锁，操作贡献变量均需要加锁
+	nReduce       int                       //Reduce数量
+	State         int                       //当前状态 map reduce success
+	MapTask       map[int]*MapTaskStatus    //map 任务状态
 	ReduceTask    map[int]*ReduceTaskStatus //reduce 任务状态
 }
 
 type MapTaskStatus struct {
-	Status    int //当前状态
+	Status    int       //当前状态
 	StartTime time.Time // 开始时间
 }
 
 type ReduceTaskStatus struct {
-	Status    int //当前状态
+	Status    int       //当前状态
 	StartTime time.Time //开始时间
-	fileList  []string //临时文件列表
+	fileList  []string  //临时文件列表
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -48,7 +47,6 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 // GetMapTask 分配MAP任务
 func (m *Master) GetMapTask(args *GetMapTaskRequest, reply *GetMapTaskResponse) error {
@@ -69,7 +67,7 @@ func (m *Master) GetMapTask(args *GetMapTaskRequest, reply *GetMapTaskResponse) 
 			// 未开始，直接分配
 			fileName = m.inputFileList[k]
 			mapStatus = Normal
-			v.Status= Processing
+			v.Status = Processing
 			v.StartTime = time.Now()
 			mapID = k
 			break
@@ -122,8 +120,8 @@ func (m *Master) Shuffle(args *ShuffleRequest, reply *ShuffleResponse) error {
 		_, ok := m.ReduceTask[k]
 		if !ok {
 			m.ReduceTask[k] = &ReduceTaskStatus{
-				Status:UnInit,
-				fileList:args.FileListMap[k],
+				Status:   UnInit,
+				fileList: args.FileListMap[k],
 			}
 		} else {
 			m.ReduceTask[k].fileList = append(m.ReduceTask[k].fileList, v...)
@@ -134,7 +132,7 @@ func (m *Master) Shuffle(args *ShuffleRequest, reply *ShuffleResponse) error {
 	isFinished := true
 	for _, v := range m.MapTask {
 		if v.Status != Finish {
-			isFinished= false
+			isFinished = false
 			break
 		}
 	}
@@ -144,7 +142,6 @@ func (m *Master) Shuffle(args *ShuffleRequest, reply *ShuffleResponse) error {
 	}
 	return nil
 }
-
 
 // GetReduceTask 分配REDUCE任务
 func (m *Master) GetReduceTask(args *GetReduceTaskRequest, reply *GetReduceTaskResponse) error {
@@ -275,7 +272,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m.State = Map
 	for i, _ := range files {
 		m.MapTask[i] = &MapTaskStatus{
-			Status:UnInit,
+			Status: UnInit,
 		}
 	}
 
